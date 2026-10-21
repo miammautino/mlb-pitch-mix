@@ -1,0 +1,257 @@
+---
+title: "Independent Baseballr Project"
+output: html_document
+date: "2026-10-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages}
+
+install.packages(c("baseballr", "dplyr", "purrr", "ggplot2", "scales"))
+library(baseballr)
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(scales)
+```
+
+```{r parameters and columns}
+  
+seasons <- 2015:2025
+#2015 - 2025 seasons
+window_start <- "08-15" 
+#month-day the window starts
+window_days <- 7 
+#length of window in days
+team <- "CWS" 
+#I'm a lifelong White Sox fan, so I'm looking to compare them
+
+columns <- c("game_date", "game_year", "pitch_type",
+             "pitch_name", "home_team", "away_team", "inning_topbot")
+```
+
+```{r date}
+
+statcast_day <- function(d) {
+  Sys.sleep(1)
+  out <- tryCatch(
+    statcast_search(start_date = as.character(d),
+                    end_date = as.character(d),
+                    player_type = "pitcher"),
+    error = function(e) NULL
+  )
+  if (is.null(out) || nrow(out) == 0) return(NULL)
+  out |>
+    select (any_of(columns)) |>
+    mutate(game_date = as.Date(game_date))
+}
+#downloads and fixes one day of data.
+# d = date passed into function
+#out = raw statcast result for the day
+
+
+date <- do.call(c, map(seasons, ~ seq(as.Date(paste0(.x,
+"-", window_start)),
+                                    by = "day",
+                                    length.out = window_days)))
+```
+
+```{r data}
+
+raw <- map_dfr(date, statcast_day)
+#combined data frame of every pitch from every sampled day
+
+saveRDS(raw, "statcast_pitch_sample.rds")
+raw <- readRDS("statcast_pitch_sample.rds")
+#save
+
+
+pitches <- raw |>
+  mutate(
+    pitching_team = if_else(inning_topbot == "Top", home_team, away_team),
+    pitch_group = case_when(
+      pitch_type == "FF"  ~  "Four-seam",
+      pitch_type %in% c("SI", "FT")  ~ "Sinker / Two-seam",
+      pitch_type == "FC"   ~ "Cutter",
+      pitch_type %in% c("SL", "ST")   ~ "Slider / Sweeper",
+      pitch_type == "SV"   ~ "Slurve",
+      pitch_type %in% c("CU", "KC", "CS") ~ "Curveball",
+      pitch_type == "CH"   ~ "Changeup",
+      pitch_type %in% c("FS", "FO")  ~ "Splitter",
+      TRUE    ~ NA_character_
+    )
+  ) |>
+  filter (!is.na(pitch_group))
+#cleaned dataset, raw with 2 new columns added and unusable removed. 
+
+#Curveball: CU, KC, and CS, variations of curveball
+#Sinker / Two-Seam: statcast labeled differently in certain years
+
+#rare occurrences are removed (knuckleballs, automatic balls, intentional balls)
+
+```
+
+```{r change from 2015 to 2025 - league}
+
+league_mix <- pitches |>
+  count(game_year, pitch_group) |>
+  group_by(game_year) |>
+  mutate(pct = n / sum(n)) |>
+  ungroup()
+
+league_mix
+
+
+#summary table of one row for each combination of season and pitch group 
+#showing what share of that season's pitches were what type.
+
+#league change over seasons
+league_change <- league_mix |> 
+  filter(game_year %in% c(2015, 2025)) |>
+  select(game_year, pitch_group, pct) |>
+  tidyr::pivot_wider(names_from = game_year,
+                     values_from = pct,
+                     values_fill = 0) |>
+  mutate(change_pts = (`2025` - `2015`) * 100) |>
+  arrange(desc(change_pts))
+
+league_change
+
+change_table <- league_change |> 
+  transmute(`Pitch Type` = pitch_group,
+            `2015 (% of pitches)` = round(`2015` * 100, 2),
+            `2025 (% of pitches)` = round(`2025` * 100, 2),
+            `Change (percentage points)` = round(change_pts, 2))
+change_table
+
+```
+```{r change from from 2015-2025 - team}
+
+team_mix <- pitches |>
+  filter(pitching_team == team) |>
+  count(game_year, pitch_group) |>
+  group_by(game_year) |>
+  mutate(pct = n / sum(n)) |>
+  ungroup()
+
+team_change <- team_mix |>
+  filter(game_year %in% c(2015, 2025)) |>
+  select(game_year, pitch_group, pct) |>
+  tidyr::pivot_wider(names_from = game_year,
+                     values_from = pct,
+                     values_fill = 0) |>
+  mutate(change_pts = (`2025` - `2015`) *100) |>
+  arrange(desc(change_pts))
+
+team_change
+
+team_change_table <- team_change |> 
+  transmute(`Pitch Type` = pitch_group,
+            `2015 (% of pitches)` = round(`2015` * 100, 2),
+            `2025 (% of pitches)` = round(`2025` * 100, 2),
+            `Change (percentage points)` = round(change_pts, 2))
+team_change_table
+
+```
+
+```{r visualizations}
+
+p_league <- ggplot(league_mix,
+                   aes(x = game_year, y = pct, color = pitch_group)) +
+  geom_line(linewidth = 1) +
+  geom_point() +
+  scale_y_continuous(labels = percent_format()) +
+  scale_x_continuous(breaks = seasons) +
+  labs(title = "MLB Pitch Mix by Season",
+       subtitle = paste0("Sample: ", window_days, " days starting ",
+                         window_start, " each year"),
+       x = "Season", y = "Share of pitches", color = "Pitch type") +
+  theme_minimal()
+
+ggsave("league_pitch_mix.png", p_league, width = 10, height = 6, dpi = 300)
+
+p_league
+#line chart, each pitch type gets its own color, indicating share of overall
+#pitches over span of time
+
+
+p_area <- ggplot(league_mix,
+                 aes(x = game_year, y = pct, fill = pitch_group)) +
+  geom_area(alpha = 0.9) +
+  scale_y_continuous(labels = percent_format()) +
+  scale_x_continuous(breaks = seasons) +
+  labs(title = "MLB Pitch Mix Make-Up",
+       x = "Season", y = "Share of pitches", fill = "Pitch type") +
+  theme_minimal()
+
+ggsave("league_pitch_mix_area.png", p_area, width = 10, height = 6, dpi = 300)
+
+p_area
+#stacked area chart of p_league, adding up to 100%
+#shows composition of pitch usage at first glance
+```
+
+```{r sliders and sweepers}
+
+breaking_trend <- pitches |>
+  mutate(in_slider_grouping = pitch_group %in% c("Slider / Sweeper")) |>
+  group_by(game_year) |>
+  summarize(pct = mean(in_slider_grouping), .groups = "drop")
+breaking_trend
+
+p_breaking <- ggplot(breaking_trend, aes(game_year,pct)) +
+  geom_line(linewidth = 1.2, color = 'steelblue') +
+  geom_point(size = 2) + 
+  scale_y_continuous(labels = percent_format()) +
+  scale_x_continuous(breaks = seasons) +
+  labs(title = 'Slider and Sweeper Usage Across MLB',
+       x = 'Season', 
+       y = 'Distribution of all Pitches') + 
+  theme_minimal()
+
+p_breaking
+```
+
+```{r team vs. league}
+
+team_mix <- pitches |> 
+  filter(pitching_team == team) |>
+  count(game_year, pitch_group) |>
+  group_by(game_year) |>
+  mutate(pct = n / sum(n)) |>
+  ungroup() |>
+  mutate(scope = team)
+
+compare <- bind_rows(league_mix |> mutate(scope = 'League'), team_mix)
+
+p_team <- ggplot(compare, 
+                 aes(x = game_year, 
+                     y = pct,
+                     color = scope)) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~ pitch_group, scales = 'free_y') +
+  scale_y_continuous(labels = percent_format()) +
+  scale_x_continuous(breaks = seq(min(seasons), max(seasons), by = 2)) +
+  labs(title = paste0(team, ' vs. League Pitch Distribution'), 
+       x = 'Season',
+       y = 'Distribution of Pitches',
+       color = NULL) +
+  theme_minimal()
+
+p_team
+
+```
+
+```{r citation}
+#@misc{petti_gilani_2021,
+#  author = {Bill Petti and Saiem Gilani},
+#  title = {baseballr: The SportsDataverse's R Package for Baseball Data.},
+#  url = {https://billpetti.github.io/baseballr/},
+#  doi = {10.32614/CRAN.package.baseballr},
+#  year = {2026}
+#}
+```
+
